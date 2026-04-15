@@ -1,0 +1,14 @@
+[gd_scene format=3 uid="uid://d301ctimamb2g"]
+
+[ext_resource type="PackedScene" uid="uid://c3pe50wmf6n23" path="res://Scenes/map.tscn" id="1_qxrlw"]
+[ext_resource type="Script" uid="uid://ddiomqshcgal3" path="res://Scripts/camera.gd" id="2_wrm1d"]
+
+[node name="Game" type="Node2D" unique_id=94944167]
+
+[node name="Map" parent="." unique_id=1220379823 instance=ExtResource("1_qxrlw")]
+position = Vector2(-1151, -1111)
+
+[node name="Camera" type="Camera2D" parent="." unique_id=1039503979]
+position = Vector2(-39, -628)
+zoom = Vector2(0.515, 0.515)
+script = ExtResource("2_wrm1d")
