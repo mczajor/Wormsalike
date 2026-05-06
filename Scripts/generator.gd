@@ -260,8 +260,49 @@ func _spawn_polygon(points: PackedVector2Array) -> void:
 		
 		
 # ═══════════════════════════════════════════════════════════════════════════════
+#  DESTRUCTION – carve a circle into the grid and rebuild polygons
+# ═══════════════════════════════════════════════════════════════════════════════
+
+func explode_at(world_pos: Vector2, radius: float) -> void:
+	if _grid.is_empty():
+		return
+
+	var local_pos: Vector2 = to_local(world_pos)
+	var gx: float = local_pos.x / float(cell_size)
+	var gy: float = local_pos.y / float(cell_size)
+	var gr: float = radius / float(cell_size)
+
+	# _grid is indexed with a +1 offset relative to world cells (see _build_grid).
+	var cx: float = gx + 1.0
+	var cy: float = gy + 1.0
+
+	var min_ix: int = maxi(0, int(cx - gr - 1.0))
+	var max_ix: int = mini(_grid_width - 1, int(cx + gr + 1.0))
+	var min_iy: int = maxi(0, int(cy - gr - 1.0))
+	var max_iy: int = mini(_grid_height - 1, int(cy + gr + 1.0))
+
+	var gr2: float = gr * gr
+	for iy in range(min_iy, max_iy + 1):
+		for ix in range(min_ix, max_ix + 1):
+			var dx: float = float(ix) - cx
+			var dy: float = float(iy) - cy
+			if dx * dx + dy * dy < gr2:
+				_grid[iy * _grid_width + ix] = -1.0
+
+	_rebuild_terrain()
+
+
+func _rebuild_terrain() -> void:
+	for child in get_children():
+		child.queue_free()
+	spawn_points.clear()
+	_build_polygons()
+	queue_redraw()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  STEP 4 – check for viable spawn points
-# ═══════════════════════════════════════════════════════════════════════════════	
+# ═══════════════════════════════════════════════════════════════════════════════
 
 func _collect_spawn_points(pixel_loops: Array) -> void:
 	var cos_threshold: float = cos(deg_to_rad(max_slope_angle))

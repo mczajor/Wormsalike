@@ -2,8 +2,10 @@
 
 [ext_resource type="PackedScene" uid="uid://c3pe50wmf6n23" path="res://Scenes/map.tscn" id="1_qxrlw"]
 [ext_resource type="Script" uid="uid://ddiomqshcgal3" path="res://Scripts/camera.gd" id="2_wrm1d"]
+[ext_resource type="Script" path="res://Scripts/game.gd" id="3_game"]
 
 [node name="Game" type="Node2D" unique_id=94944167]
+script = ExtResource("3_game")
 
 [node name="Map" parent="." unique_id=1220379823 instance=ExtResource("1_qxrlw")]
 position = Vector2(-1151, -1111)
