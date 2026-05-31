@@ -1,0 +1,19 @@
+[gd_scene format=3 uid="uid://crole36a5bubl"]
+
+[ext_resource type="Script" uid="uid://yua16g8slrg8" path="res://Scripts/hud.gd" id="1_e0onf"]
+
+[node name="CanvasLayer" type="CanvasLayer" unique_id=235665908]
+process_priority = 10
+script = ExtResource("1_e0onf")
+
+[node name="Margin" type="MarginContainer" parent="." unique_id=1879862867]
+offset_right = 40.0
+offset_bottom = 40.0
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 8
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 8
+
+[node name="Cards" type="HBoxContainer" parent="Margin" unique_id=17126931]
+layout_mode = 2
+theme_override_constants/separation = 8

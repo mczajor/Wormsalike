@@ -2,8 +2,8 @@
 extends Node2D
 
 @export var terrain_noise := FastNoiseLite.new()
-@export var map_width:  int   = 300
-@export var map_height: int   = 120
+@export var map_width:  int   = 1500
+@export var map_height: int   = 1000
 @export var cell_size:  int   = 7
 
 @export var noise_frequency: float = 0.01
@@ -22,7 +22,7 @@ extends Node2D
 
 #Spawn points 
 @export var max_slope_angle: float = 50.0   
-@export var spawn_offset:    float = 3.0   
+@export var spawn_offset:    float = 14.0  
 @export var spawn_spacing:   float = 6.0 
 
 
@@ -31,11 +31,6 @@ var _grid_height: int
 var _grid: PackedFloat32Array
 var spawn_points: Array[Vector2] = []
 
-
-
-func _draw() -> void:
-	for p in spawn_points:
-		draw_circle(p, 4.0, Color.GREEN)
 
 func _ready() -> void:
 	generate()
@@ -48,6 +43,7 @@ func generate(_seed: int = 0) -> void:
 	set_terrain_noise(_seed)
 	spawn_points.clear()
 	_build_grid()
+	_fill_enclosed_caves()
 	_build_polygons()
 
 func set_terrain_noise(_seed: int):
@@ -81,6 +77,67 @@ func _build_grid() -> void:
 			var falloff: float = pow(2.0 * fx - 1.0, 2.0) * edge_falloff
 			var n: float = (terrain_noise.get_noise_2d(float(x), float(y)) + 1.0) * 0.5
 			_grid[(y + 1) * _grid_width + (x + 1)] = n - height_threshold - falloff * 1.2
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STEP 1.5 – fill enclosed caves so the grid matches what gets rendered
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Marching squares paints odd-depth (enclosed) loops as solid ground, but the
+# grid still holds them as empty (<= 0). That mismatch let worms spawn inside
+# "caves" that look solid and have no collision boundary. We reconcile it here:
+# flood-fill empty space inward from the map border, then mark any empty cell
+# the flood never reached as solid. After this pass, every empty cell is
+# reachable from outside, so no enclosed pockets remain.
+
+func _fill_enclosed_caves() -> void:
+	var total: int = _grid_width * _grid_height
+	# reachable[i] == true  ->  this empty cell connects to the outside border.
+	var reachable := PackedByteArray()
+	reachable.resize(total)
+
+	var stack: Array[int] = []
+
+	# Seed the flood from every border cell that is currently empty.
+	for ix in _grid_width:
+		_seed_if_empty(ix, 0,                stack, reachable)
+		_seed_if_empty(ix, _grid_height - 1, stack, reachable)
+	for iy in _grid_height:
+		_seed_if_empty(0,               iy, stack, reachable)
+		_seed_if_empty(_grid_width - 1, iy, stack, reachable)
+
+	# 4-directional flood fill across empty cells.
+	while not stack.is_empty():
+		var idx: int = stack.pop_back()
+		var x: int = idx % _grid_width
+		var y: int = idx / _grid_width
+
+		if x > 0:
+			_seed_if_empty(x - 1, y, stack, reachable)
+		if x < _grid_width - 1:
+			_seed_if_empty(x + 1, y, stack, reachable)
+		if y > 0:
+			_seed_if_empty(x, y - 1, stack, reachable)
+		if y < _grid_height - 1:
+			_seed_if_empty(x, y + 1, stack, reachable)
+
+	# Any empty cell the flood never reached is an enclosed cave -> make it solid.
+	# Use a small positive value so marching squares treats it as ground.
+	for i in total:
+		if _grid[i] <= 0.0 and reachable[i] == 0:
+			_grid[i] = 1.0
+
+
+# Helper: if the cell at (x, y) is empty and not yet visited, mark it reachable
+# and push it onto the flood-fill stack.
+func _seed_if_empty(x: int, y: int, stack: Array[int], reachable: PackedByteArray) -> void:
+	var idx: int = y * _grid_width + x
+	if reachable[idx] == 1:
+		return
+	if _grid[idx] > 0.0:
+		return   # solid cell, flood can't pass through
+	reachable[idx] = 1
+	stack.append(idx)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  STEP 2 – Marching Squares with interpolated edge crossings
@@ -296,6 +353,7 @@ func _rebuild_terrain() -> void:
 	for child in get_children():
 		child.queue_free()
 	spawn_points.clear()
+	_fill_enclosed_caves()
 	_build_polygons()
 	queue_redraw()
 

@@ -1,12 +1,11 @@
-[gd_scene load_steps=3 format=3 uid="uid://dwormscene001"]
+[gd_scene format=3 uid="uid://dwormscene001"]
 
-[ext_resource type="Script" path="res://Scripts/worm.gd" id="1_worm"]
+[ext_resource type="Script" uid="uid://brlk0s11qrixy" path="res://Scripts/worm.gd" id="1_worm"]
 
 [sub_resource type="CircleShape2D" id="CircleShape2D_worm"]
-radius = 10.0
 
-[node name="Worm" type="CharacterBody2D"]
+[node name="Worm" type="CharacterBody2D" unique_id=1432403115]
 script = ExtResource("1_worm")
 
-[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=439348279]
 shape = SubResource("CircleShape2D_worm")
