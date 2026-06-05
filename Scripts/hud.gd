@@ -20,9 +20,49 @@ signal quit_cancelled
 ## The pause-menu overlay, built on demand. Null when not showing.
 var _pause_menu: Control = null
 
+## Turn-countdown label, centered at the top of the screen.
+var _timer_label: Label
+
+## Selected-weapon label, top-right corner.
+var _weapon_label: Label
+
+
+func _ready() -> void:
+	_timer_label = Label.new()
+	_timer_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_timer_label.add_theme_font_size_override("font_size", 28)
+	_timer_label.add_theme_color_override("font_color", Color.WHITE)
+	_timer_label.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
+	_timer_label.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_timer_label.position.y = 8.0
+	_timer_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_timer_label)
+
+	_weapon_label = Label.new()
+	_weapon_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_weapon_label.add_theme_font_size_override("font_size", 16)
+	_weapon_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
+	_weapon_label.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	_weapon_label.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_weapon_label.position += Vector2(-10.0, 10.0)
+	_weapon_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_weapon_label)
+
+
+## Show which weapon is selected (called by GameManager on switch).
+func set_weapon(weapon_name: String) -> void:
+	_weapon_label.text = "[1/2]  " + weapon_name
+
 
 func is_pause_menu_open() -> bool:
 	return _pause_menu != null
+
+
+## Update the turn countdown. Turns red for the final 5 seconds.
+func set_time_left(seconds: float) -> void:
+	_timer_label.text = str(ceili(maxf(seconds, 0.0)))
+	_timer_label.add_theme_color_override("font_color",
+			Color(1.0, 0.3, 0.3) if seconds <= 5.0 else Color.WHITE)
 
 
 func refresh(players: Array, player_colors: Array[Color], current_player: int) -> void:
@@ -75,7 +115,7 @@ func show_winner(player_idx: int, color: Color) -> void:
 	vbox.add_child(label)
 
 	var hint := Label.new()
-	hint.text = "Press ESC to quit"
+	hint.text = "Press ESC to return to the menu"
 	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
 	hint.add_theme_font_size_override("font_size", 16)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
