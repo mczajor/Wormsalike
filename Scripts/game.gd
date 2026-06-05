@@ -3,11 +3,39 @@ extends Node2D
 ## Top-level game controller.
 ##   - Spawns worms and assigns them to players in round-robin order.
 ##   - Tab   = cycle active worm within the current player's team.
-##   - Esc   = end current player's turn, pass control to the next player.
-##   - LMB   = explosion at mouse position (carves terrain, knocks worms).
+##   - Esc   = open the pause menu.
+##   - 1/2 = select weapon (bazooka / grenade).
+##   - LMB (hold) = charge shot power, release = fire.
+
+enum Weapon { BAZOOKA, GRENADE }
 
 @export var explosion_radius:  float = 40.0
 @export var knockback_strength: float = 600.0
+
+## Grenade: bigger blast than the bazooka, thrown shorter, 3s fuse.
+@export var grenade_radius:    float = 65.0
+@export var grenade_damage:    float = 40.0
+@export var grenade_fuse:      float = 3.0
+@export var grenade_min_speed: float = 200.0
+@export var grenade_max_speed: float = 850.0
+
+## Bazooka: rocket launch speed at zero / full charge, and how many seconds
+## of holding LMB it takes to reach full charge (auto-fires when maxed).
+@export var min_launch_speed: float = 300.0
+@export var max_launch_speed: float = 1300.0
+@export var max_charge_time:  float = 1.2
+
+## Gravity applied to rockets in flight (matches worm gravity by default).
+@export var projectile_gravity: float = 900.0
+
+## How far from the worm's center the rocket spawns (past the bazooka muzzle).
+@export var muzzle_offset: float = 20.0
+
+## Seconds each turn lasts. Hitting zero passes control to the next player.
+## The countdown freezes once the shot is fired (the rocket resolves in peace).
+@export var turn_time: float = 30.0
+
+var _turn_time_left: float = 0.0
 
 ## Damage dealt to each worm caught in an explosion.
 @export var shot_damage: float = 25.0
@@ -59,6 +87,23 @@ const WormScene: PackedScene = preload("res://Scenes/worm.tscn")
 const HudScene:        PackedScene = preload("res://Scenes/hud.tscn")
 const ExplosionEffect: GDScript    = preload("res://Scripts/explosion_effect.gd")
 
+## Per-weapon display name, held sprite and grip offset (see Worm.weapon_grip).
+const WEAPON_INFO: Dictionary = {
+	Weapon.BAZOOKA: {
+		"name": "Bazooka",
+		"texture": preload("res://Assets/bazooka.png"),
+		"grip": -8.0,
+	},
+	Weapon.GRENADE: {
+		"name": "Grenade",
+		"texture": preload("res://Assets/grenade.png"),
+		"grip": 6.0,
+	},
+}
+
+## Currently selected weapon — persists across turns until changed.
+var _weapon: Weapon = Weapon.BAZOOKA
+
 @onready var _generator: Node2D = $Map/Generator
 @onready var _camera:    Camera2D = $Camera
 
@@ -73,13 +118,23 @@ var _current_player: int = 0
 ## Index into _players[_current_player] — which of that player's worms is selected.
 var _current_worm: int = 0
 
-## Endpoints for the aim line, updated every frame. Both are Vector2.ZERO
-## when there is no active shooter (nothing is drawn).
-var _aim_start: Vector2 = Vector2.ZERO
-var _aim_end:   Vector2 = Vector2.ZERO
+## Predicted rocket path, updated every frame while aiming. Empty when there
+## is no active shooter (nothing is drawn).
+var _trajectory: PackedVector2Array = PackedVector2Array()
+
+## True while LMB is held; _charge ramps 0 → 1 over max_charge_time.
+var _charging: bool = false
+var _charge:   float = 0.0
+
+## Position of the active shooter this frame — anchor for the power bar.
+var _shooter_pos: Vector2 = Vector2.ZERO
 
 ## Set true once a player has won. Freezes turn/shoot input.
 var _game_over: bool = false
+
+## False until all worms are spawned — blocks premature winner checks when a
+## worm dies during the spawn sequence (e.g. a point below the kill plane).
+var _match_started: bool = false
 
 ## True after the current player has fired their single shot.
 ## Blocks further shooting and character switching until the next turn.
@@ -96,6 +151,10 @@ var _turn_ending: bool = false
 
 
 func _ready() -> void:
+	# Match settings chosen in the main menu.
+	num_players = GameConfig.num_players
+	num_worms   = GameConfig.num_players * GameConfig.worms_per_team
+
 	_hud = HudScene.instantiate()
 	add_child(_hud)
 	_hud.quit_confirmed.connect(_on_quit_confirmed)
@@ -106,7 +165,16 @@ func _ready() -> void:
 	_frame_camera_on_map()
 	get_viewport().size_changed.connect(_frame_camera_on_map)
 
+	# Initialise the clock BEFORE the await — _process already ticks while
+	# worms are spawning, and the default 0 would end turn 1 immediately.
+	_turn_time_left = turn_time
+	_hud.set_time_left(turn_time)
+	_hud.set_weapon(WEAPON_INFO[_weapon]["name"])
+
 	await _spawn_worms()
+	_match_started = true
+	if _check_for_winner():
+		return
 	print("=== Game Start — Player %d's turn ===" % (_current_player + 1))
 
 
@@ -152,20 +220,30 @@ func _build_environment() -> void:
 
 
 # ---------------------------------------------------------------------------
-# Aim line
+# Aiming & charge
 # ---------------------------------------------------------------------------
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if _game_over or _hud.is_pause_menu_open():
-		_aim_start = Vector2.ZERO
-		_aim_end   = Vector2.ZERO
-		queue_redraw()
+		_clear_aim()
+		return
+
+	# Turn countdown — frozen once the shot is in flight.
+	if not _has_shot and not _players.is_empty():
+		_turn_time_left = maxf(0.0, _turn_time_left - delta)
+		_hud.set_time_left(_turn_time_left)
+		if _turn_time_left <= 0.0:
+			_clear_aim()
+			print("=== Player %d ran out of time ===" % (_current_player + 1))
+			_end_turn()
+			return
+
+	if _has_shot:
+		_clear_aim()
 		return
 	var team: Array = _players[_current_player] if not _players.is_empty() else []
 	if team.is_empty():
-		_aim_start = Vector2.ZERO
-		_aim_end   = Vector2.ZERO
-		queue_redraw()
+		_clear_aim()
 		return
 
 	var shooter: Worm = team[_current_worm]
@@ -173,29 +251,86 @@ func _process(_delta: float) -> void:
 	var mouse: Vector2     = get_global_mouse_position()
 	var direction: Vector2 = (mouse - origin).normalized()
 
-	# Extend the ray far enough to always reach the map edge.
-	var map_diagonal: float = Vector2(
-		float(_generator.map_width) * float(_generator.cell_size),
-		float(_generator.map_height) * float(_generator.cell_size)
-	).length()
-	var far_point: Vector2 = origin + direction * map_diagonal
+	shooter.aim_angle = direction.angle()
+	_shooter_pos = origin
 
-	var space := get_world_2d().direct_space_state
-	var query := PhysicsRayQueryParameters2D.create(origin, far_point)
-	query.exclude = [shooter.get_rid()]
-	var hit := space.intersect_ray(query)
+	# No aiming while flying — the weapon is holstered.
+	if shooter.jetpack_on:
+		_clear_aim()
+		return
 
-	_aim_start = origin
-	_aim_end   = hit.position if not hit.is_empty() else far_point
+	if _charging:
+		_charge = minf(_charge + delta / max_charge_time, 1.0)
+
+	# Preview at the current charge while charging, else at half power.
+	var preview_power: float = _charge if _charging else 0.5
+	_trajectory = _simulate_trajectory(shooter, direction, _launch_speed(preview_power))
+	queue_redraw()
+
+	# Bar full → the shot leaves whether you like it or not.
+	if _charging and _charge >= 1.0:
+		_release_shot()
+
+
+func _clear_aim() -> void:
+	_trajectory = PackedVector2Array()
+	_charging = false
+	_charge = 0.0
 	queue_redraw()
 
 
+func _launch_speed(power: float) -> float:
+	if _weapon == Weapon.GRENADE:
+		return lerpf(grenade_min_speed, grenade_max_speed, power)
+	return lerpf(min_launch_speed, max_launch_speed, power)
+
+
+## Steps the rocket's ballistic motion and raycasts each step against the
+## world, so the preview lands exactly where the real projectile will.
+func _simulate_trajectory(shooter: Worm, direction: Vector2, speed: float) -> PackedVector2Array:
+	var points := PackedVector2Array()
+	var pos: Vector2 = shooter.global_position + direction * muzzle_offset
+	var vel: Vector2 = direction * speed
+	var dt: float = 1.0 / 60.0
+	var space := get_world_2d().direct_space_state
+
+	for i in 120:
+		var prev: Vector2 = pos
+		vel.y += projectile_gravity * dt
+		pos += vel * dt
+		var query := PhysicsRayQueryParameters2D.create(prev, pos)
+		query.exclude = [shooter.get_rid()]
+		var hit := space.intersect_ray(query)
+		if not hit.is_empty():
+			points.append(hit.position)
+			break
+		points.append(pos)
+	return points
+
+
 func _draw() -> void:
-	if _aim_start == Vector2.ZERO and _aim_end == Vector2.ZERO:
+	if _trajectory.is_empty():
 		return
-	draw_line(_aim_start, _aim_end, Color(1, 1, 1, 0.55), 1.0)
-	# Small dot at the impact point so it's clear where the shot lands.
-	draw_circle(_aim_end, 2.5, Color(1, 1, 1, 0.8))
+
+	# Dotted parabola, fading toward the far end.
+	var n: int = _trajectory.size()
+	for i in range(0, n, 3):
+		var alpha: float = lerpf(0.7, 0.15, float(i) / float(maxi(n - 1, 1)))
+		draw_circle(_trajectory[i], 1.8, Color(1, 1, 1, alpha))
+	# Impact marker.
+	draw_circle(_trajectory[n - 1], 3.0, Color(1, 0.4, 0.2, 0.9))
+
+	if not _charging:
+		return
+
+	# Power bar above the shooter, green → red as it charges.
+	const BAR_W: float = 34.0
+	const BAR_H: float = 5.0
+	var top_left: Vector2 = _shooter_pos + Vector2(-BAR_W * 0.5, -34.0)
+	draw_rect(Rect2(top_left, Vector2(BAR_W, BAR_H)), Color(0, 0, 0, 0.6))
+	draw_rect(Rect2(top_left, Vector2(BAR_W * _charge, BAR_H)),
+			Color(1.0, 1.0 - _charge, 0.15))
+	draw_rect(Rect2(top_left, Vector2(BAR_W, BAR_H)), Color(0, 0, 0, 0.5), false, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +359,11 @@ func _spawn_worms() -> void:
 		_players.append([])
 
 	var pts: Array[Vector2] = _generator.spawn_points.duplicate()
+	# Drop points at or below the kill plane — worms would die on spawn.
+	if _kill_plane != null:
+		var kill_y: float = _kill_plane.get_kill_y()
+		pts = pts.filter(func(p: Vector2) -> bool:
+			return _generator.to_global(p).y < kill_y - 20.0)
 	pts.shuffle()
 	var n: int = mini(num_worms, pts.size())
 	# Track which points have been used so retries don't reuse them.
@@ -275,10 +415,10 @@ func _spawn_worms() -> void:
 # ---------------------------------------------------------------------------
 
 func _unhandled_input(event: InputEvent) -> void:
-	# Once the game is over, the only accepted input is ESC to quit.
+	# Once the game is over, the only accepted input is ESC back to the menu.
 	if _game_over:
 		if event is InputEventKey and event.pressed and event.physical_keycode == KEY_ESCAPE:
-			get_tree().quit()
+			get_tree().change_scene_to_file("res://Scenes/menu.tscn")
 		return
 
 	# While the pause menu is open, ESC closes it; all other input is ignored
@@ -288,10 +428,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			_on_quit_cancelled()
 		return
 
-	if event is InputEventMouseButton and event.pressed:
+	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
-			_shoot()
-		elif event.button_index == MOUSE_BUTTON_RIGHT:
+			if event.pressed:
+				_begin_charge()
+			else:
+				_release_shot()
+		elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
 			_explode_at(get_global_mouse_position())
 		return
 
@@ -305,6 +448,29 @@ func _unhandled_input(event: InputEvent) -> void:
 			_open_pause_menu()
 		KEY_F11:
 			_toggle_fullscreen()
+		KEY_1:
+			_select_weapon(Weapon.BAZOOKA)
+		KEY_2:
+			_select_weapon(Weapon.GRENADE)
+
+
+## Switch the current weapon (blocked mid-charge and after the shot).
+func _select_weapon(weapon: Weapon) -> void:
+	if _has_shot or _charging or weapon == _weapon:
+		return
+	_weapon = weapon
+	_apply_weapon_visual()
+	_hud.set_weapon(WEAPON_INFO[_weapon]["name"])
+
+
+## Push the selected weapon's sprite onto the active worm.
+func _apply_weapon_visual() -> void:
+	var team: Array = _players[_current_player] if not _players.is_empty() else []
+	if team.is_empty() or _current_worm >= team.size():
+		return
+	var shooter: Worm = team[_current_worm]
+	shooter.weapon_texture = WEAPON_INFO[_weapon]["texture"]
+	shooter.weapon_grip    = WEAPON_INFO[_weapon]["grip"]
 
 
 ## Open the confirmation menu and freeze the active worm's movement.
@@ -316,7 +482,7 @@ func _open_pause_menu() -> void:
 
 
 func _on_quit_confirmed() -> void:
-	get_tree().quit()
+	get_tree().change_scene_to_file("res://Scenes/menu.tscn")
 
 
 func _on_quit_cancelled() -> void:
@@ -349,6 +515,10 @@ func _cycle_worm_within_player() -> void:
 	if team.size() <= 1:
 		return   # nothing to cycle through
 
+	# Switching worms drops any charge in progress.
+	_charging = false
+	_charge = 0.0
+
 	_deactivate_current_worm()
 	_current_worm = (_current_worm + 1) % team.size()
 	_activate_current_worm()
@@ -379,11 +549,16 @@ func _end_turn() -> void:
 	_current_worm = 0
 	_has_shot = false
 	_turn_ending = false
+	_turn_time_left = turn_time
+	_hud.set_time_left(turn_time)
 
-	# Clear any leftover input lock from the previous shot.
+	# Clear any leftover input lock from the previous shot, take jetpacks off
+	# and refill them.
 	for team in _players:
 		for w: Worm in team:
 			w.input_locked = false
+			w.jetpack_on   = false
+			w.jetpack_fuel = w.jetpack_max_fuel
 
 	_activate_current_worm()
 	_refresh_hud()
@@ -405,6 +580,7 @@ func _activate_current_worm() -> void:
 	if team.is_empty():
 		return
 	(team[_current_worm] as Worm).is_active = true
+	_apply_weapon_visual()
 
 
 func _deactivate_current_worm() -> void:
@@ -445,6 +621,8 @@ func _on_worm_died(worm: Worm) -> void:
 
 ## Returns true and ends the game if only one player has worms left.
 func _check_for_winner() -> bool:
+	if not _match_started:
+		return false
 	var alive_players: Array[int] = []
 	for i in _players.size():
 		if not _players[i].is_empty():
@@ -471,55 +649,97 @@ func _refresh_hud() -> void:
 	_hud.refresh(_players, PLAYER_COLORS, _current_player)
 
 
-func _spawn_explosion_effect(world_pos: Vector2) -> void:
+func _spawn_explosion_effect(world_pos: Vector2, radius: float) -> void:
 	var effect := Node2D.new()
 	effect.set_script(ExplosionEffect)
 	add_child(effect)
 	effect.global_position = world_pos
-	effect.init(explosion_radius * 2.0)
+	effect.init(radius * 2.0)
 
 
 # ---------------------------------------------------------------------------
-# Explosions
+# Shooting & explosions
 # ---------------------------------------------------------------------------
 
-func _shoot() -> void:
-	if _has_shot:
-		return   # one shot per turn
+func _begin_charge() -> void:
+	if _has_shot or _charging:
+		return
+	var team: Array = _players[_current_player]
+	if team.is_empty():
+		return
+	if (team[_current_worm] as Worm).jetpack_on:
+		return   # weapon is holstered while flying
+	_charging = true
+	_charge = 0.0
+
+
+func _release_shot() -> void:
+	if not _charging or _has_shot:
+		return
+	_charging = false
+
 	var team: Array = _players[_current_player]
 	if team.is_empty():
 		return
 	var shooter: Worm = team[_current_worm]
 
 	var origin: Vector2    = shooter.global_position
-	var mouse: Vector2     = get_global_mouse_position()
-	var direction: Vector2 = (mouse - origin).normalized()
+	var direction: Vector2 = (get_global_mouse_position() - origin).normalized()
+	var speed: float = _launch_speed(_charge)
+	var kill_y: float = _kill_plane.get_kill_y() if _kill_plane != null else INF
 
-	var map_diagonal: float = Vector2(
-		float(_generator.map_width) * float(_generator.cell_size),
-		float(_generator.map_height) * float(_generator.cell_size)
-	).length()
-	var far_point: Vector2 = origin + direction * map_diagonal
-
-	var space := get_world_2d().direct_space_state
-	var query := PhysicsRayQueryParameters2D.create(origin, far_point)
-	query.exclude = [shooter.get_rid()]
-	var hit := space.intersect_ray(query)
-
-	var explosion_pos: Vector2 = hit.position if not hit.is_empty() else far_point
-	_explode_at(explosion_pos)
+	match _weapon:
+		Weapon.GRENADE:
+			var grenade := Grenade.new()
+			grenade.gravity = projectile_gravity
+			grenade.kill_y  = kill_y
+			grenade.fuse    = grenade_fuse
+			add_child(grenade)
+			grenade.launch(origin + direction * muzzle_offset, direction * speed, shooter)
+			grenade.exploded.connect(_on_grenade_exploded)
+			grenade.missed.connect(_on_projectile_missed)
+		_:
+			var rocket := Projectile.new()
+			rocket.gravity = projectile_gravity
+			rocket.kill_y  = kill_y
+			add_child(rocket)
+			rocket.launch(origin + direction * muzzle_offset, direction * speed, shooter)
+			rocket.exploded.connect(_on_rocket_exploded)
+			rocket.missed.connect(_on_projectile_missed)
 
 	# Lock the turn: no more shooting, switching, or movement.
 	_has_shot = true
+	_charge = 0.0
 	shooter.input_locked = true
+
+
+func _on_rocket_exploded(world_pos: Vector2) -> void:
+	_explode_at(world_pos)
 	_end_turn_after_shot()
 
 
-func _explode_at(world_pos: Vector2) -> void:
-	_generator.explode_at(world_pos, explosion_radius)
-	_spawn_explosion_effect(world_pos)
+func _on_grenade_exploded(world_pos: Vector2) -> void:
+	_explode_at(world_pos, grenade_radius, grenade_damage)
+	_end_turn_after_shot()
 
-	var reach: float = explosion_radius * 2.0
+
+func _on_projectile_missed() -> void:
+	_end_turn_after_shot()
+
+
+func _explode_at(world_pos: Vector2, radius: float = -1.0,
+		damage: float = -1.0, knockback: float = -1.0) -> void:
+	if radius < 0.0:
+		radius = explosion_radius
+	if damage < 0.0:
+		damage = shot_damage
+	if knockback < 0.0:
+		knockback = knockback_strength
+
+	_generator.explode_at(world_pos, radius)
+	_spawn_explosion_effect(world_pos, radius)
+
+	var reach: float = radius * 2.0
 	var killed: Array[Worm] = []
 	for team in _players:
 		for w: Worm in team:
@@ -531,10 +751,10 @@ func _explode_at(world_pos: Vector2) -> void:
 				continue
 			var dir: Vector2 = offset.normalized() if d > 0.01 else Vector2.UP
 			var falloff: float = 1.0 - (d / reach)
-			w.velocity += dir * knockback_strength * falloff
-			# Damage scales linearly with proximity: full shot_damage at the
+			w.velocity += dir * knockback * falloff
+			# Damage scales linearly with proximity: full damage at the
 			# blast center, falling to 0 at the edge of reach.
-			if w.take_damage(shot_damage * falloff):
+			if w.take_damage(damage * falloff):
 				killed.append(w)
 
 	# Process deaths AFTER the loop so we don't mutate the team arrays mid-iteration.
